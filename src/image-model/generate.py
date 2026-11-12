@@ -49,7 +49,9 @@ pipe = QwenImage21Pipeline.from_pretrained(
     "Qwen/Qwen-Image-2.1",
     dtype=dtype,
     cache_dir=str(MODEL_CACHE_DIR)
-).to("cuda")
+)
+
+pipe.enable_model_cpu_offload()
 
 print("Modelo cargado correctamente.")
 
