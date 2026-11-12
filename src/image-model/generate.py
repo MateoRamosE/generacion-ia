@@ -1,4 +1,3 @@
-
 from pathlib import Path
 from datetime import datetime
 
@@ -13,8 +12,10 @@ from diffusers import QwenImage21Pipeline
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "results" / "images"
+MODEL_CACHE_DIR = Path("/workspace/modelos/huggingface/hub")
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # --------------------------------------------------
@@ -46,7 +47,8 @@ print("\nCargando Qwen-Image 2.1...")
 
 pipe = QwenImage21Pipeline.from_pretrained(
     "Qwen/Qwen-Image-2.1",
-    dtype=dtype
+    dtype=dtype,
+    cache_dir=str(MODEL_CACHE_DIR)
 ).to("cuda")
 
 print("Modelo cargado correctamente.")
