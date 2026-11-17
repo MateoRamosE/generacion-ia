@@ -1,7 +1,5 @@
-venv/
-.venv/
 __pycache__/
 *.py[cod]
-.env
-.cache/
-results/
+.venv/
+results/images/*
+results/metrics/*.csv

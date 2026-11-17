@@ -1,0 +1,30 @@
+{
+  "cache_dir": "/workspace/modelos/huggingface/hub",
+  "output_dir": "/workspace/generacion-ia/results/images",
+  "gpu_usd_per_hour": 0.0,
+  "sample_interval_seconds": 0.5,
+  "batch_size": 1,
+  "offload": "cpu",
+  "models": {
+    "generate": {
+      "id": "Qwen/Qwen-Image-2512",
+      "dtype": "bfloat16",
+      "width": 1024,
+      "height": 1024,
+      "steps": 50,
+      "true_cfg_scale": 1.0,
+      "negative_prompt": " "
+    },
+    "edit": {
+      "id": "Qwen/Qwen-Image-Edit-2511",
+      "dtype": "bfloat16",
+      "width": null,
+      "height": null,
+      "steps": 40,
+      "true_cfg_scale": 4.0,
+      "negative_prompt": " "
+    }
+  },
+  "max_images_per_call": 1,
+  "images_per_prompt": 1
+}

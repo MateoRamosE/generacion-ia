@@ -1,7 +1,8 @@
-# Diffusers con soporte para Qwen-Image 2.1
-git+https://github.com/huggingface/diffusers.git
-
-# Dependencias del modelo
-transformers>=5.17
+# Instalar primero PyTorch CUDA según la imagen de RunPod; no reemplazar su build por CPU.
+diffusers==0.43.0
+transformers==5.23.0
 accelerate
 pillow
+huggingface_hub==2.4.0
+psutil
+nvidia-ml-py

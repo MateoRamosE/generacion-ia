@@ -1,0 +1,34 @@
+test_batches_cover_once_and_respect_both_limits (test_core.CoreTests.test_batches_cover_once_and_respect_both_limits) ... ok
+test_cli_precedence (test_core.CoreTests.test_cli_precedence) ... ok
+test_csv_accumulation_and_header (test_core.CoreTests.test_csv_accumulation_and_header) ... ok
+test_failure_records_once_and_stops_sampler (test_core.CoreTests.test_failure_records_once_and_stops_sampler) ... Traceback (most recent call last):
+  File "/workspace/work/generacion-ia/src/image-model/worker.py", line 30, in execute
+    pipe = load_model(job, row)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1198, in _execute_mock_call
+    raise effect
+RuntimeError: load failed
+ok
+test_names_and_exclusive_write (test_core.CoreTests.test_names_and_exclusive_write) ... ok
+test_partial_configuration_and_no_write (test_core.CoreTests.test_partial_configuration_and_no_write) ... ok
+test_process_interrupt_reaps (test_core.CoreTests.test_process_interrupt_reaps) ... ok
+test_process_waits (test_core.CoreTests.test_process_waits) ... ok
+test_selection_and_signature (test_core.CoreTests.test_selection_and_signature) ... ok
+test_ten_images_five_calls_seeds_and_metrics (test_core.CoreTests.test_ten_images_five_calls_seeds_and_metrics) ... ok
+test_validation (test_core.CoreTests.test_validation) ... ok
+test_offline_never_uses_remote_plan (test_core.ModelTests.test_offline_never_uses_remote_plan) ... ok
+test_online_cache_complete_and_missing (test_core.ModelTests.test_online_cache_complete_and_missing) ... ok
+test_sampler_constant_memory_and_finish (test_core.ModelTests.test_sampler_constant_memory_and_finish) ... ok
+test_pipeline_reference_released_after_failure (test_core.ResourceTests.test_pipeline_reference_released_after_failure) ... ok
+test_reference_conversion_closes_sources_and_outputs (test_core.ResourceTests.test_reference_conversion_closes_sources_and_outputs) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.037s
+
+OK
