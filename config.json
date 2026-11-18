@@ -4,7 +4,7 @@
   "gpu_usd_per_hour": 0.0,
   "sample_interval_seconds": 0.5,
   "batch_size": 1,
-  "offload": "cpu",
+  "offload": "on",
   "models": {
     "generate": {
       "id": "Qwen/Qwen-Image-2512",

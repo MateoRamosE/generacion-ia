@@ -5,6 +5,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from decimal import Decimal
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -69,17 +71,37 @@ class CoreTests(unittest.TestCase):
                 path.open('xb')
             self.assertEqual(path.read_bytes(), b'original')
 
-    def test_csv_accumulation_and_header(self):
+    def test_csv_migration_deduplication_and_time_balance(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'nested' / 'metrics.csv'
-            for i in range(3):
-                metrics.append_csv(path, ['id', 'text'], {'id': i, 'text': 'a,b\nc'})
-            with path.open() as stream:
-                rows = list(csv.DictReader(stream))
-            self.assertEqual(len(rows), 3)
-            self.assertEqual(rows[0]['text'], 'a,b\nc')
-            with self.assertRaises(ValueError):
-                metrics.append_csv(path, ['different'], {})
+            path = Path(tmp) / 'executions.csv'
+            path.write_text('run_id,started_at,total_cost_usd\nold,2025-03-04T11:00:00,0.35\n')
+            path.with_name('executions-v2.csv').write_text(
+                'run_id,operation,load_seconds,parameters_json\n'
+                'old,generate,7,"{""offload"":""cpu""}"\n')
+            path.with_name('images.csv').write_text(
+                'run_id,image_path,width,height\nold,abc,16,32\nold,abc,16,32\n')
+            for i in ('new', 'new', 'newer'):
+                clock = metrics.StageClock()
+                clock.switch('inference')
+                metrics.write_execution(path, {'run_id': i, 'error': 'a,b\nc',
+                                               'gpu_usd_per_hour': 2.71}, clock)
+            with path.open(newline='') as stream:
+                reader = csv.DictReader(stream)
+                self.assertEqual(reader.fieldnames, metrics.RUN_FIELDS)
+                old, new, newer = list(reader)
+            self.assertEqual(old['date'], '25-03-04')
+            self.assertEqual(old['offload'], 'on')
+            self.assertEqual(old['images_count'], '1')
+            self.assertEqual(old['total_cost_usd'], '0.35')
+            self.assertEqual(old['model_read_seconds'], '')
+            self.assertEqual(old['model_prepare_seconds'], '')
+            self.assertEqual(new['error'], 'a,b\nc')
+            for row in (new, newer):
+                measured = sum(Decimal(row[f'{stage}_seconds']) for stage in metrics.STAGES)
+                self.assertEqual(measured, Decimal(row['total_seconds']))
+                self.assertGreater(Decimal(row['metrics_write_seconds']), 0)
+                self.assertAlmostEqual(float(row['total_cost_usd']), float(measured) * 2.71 / 3600)
+            self.assertEqual(list(path.parent.iterdir()), [path])
 
     def test_selection_and_signature(self):
         self.assertEqual(models.MODEL_CLASSES['edit'], 'QwenImageEditPlusPipeline')
@@ -118,7 +140,7 @@ class CoreTests(unittest.TestCase):
                 sampler.return_value.finish.return_value = {}
                 self.assertEqual(worker.execute(job), 1)
                 sampler.return_value.finish.assert_called_once()
-            with (Path(tmp) / 'executions-v2.csv').open() as stream:
+            with (Path(tmp) / 'executions.csv').open() as stream:
                 rows = list(csv.DictReader(stream))
             self.assertEqual(len(rows), 1)
             self.assertIn('load failed', rows[0]['error'])
@@ -154,8 +176,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(pipe.calls, 5)
             self.assertEqual(seeds, list(range(100, 110)))
             self.assertEqual(row['images_count'], 10)
-            with (Path(tmp) / 'images.csv').open() as stream:
-                self.assertEqual(len(list(csv.DictReader(stream))), 10)
+            self.assertEqual(len(list(Path(tmp).glob('*.png'))), 10)
+            self.assertFalse(list(Path(tmp).glob('*.csv')))
 
 
 class ModelTests(unittest.TestCase):
@@ -166,8 +188,23 @@ class ModelTests(unittest.TestCase):
             diffusers = MagicMock(__version__='mock')
             transformers = SimpleNamespace(__version__='mock')
             hub = MagicMock()
-            hub.snapshot_download.side_effect = [
-                [SimpleNamespace(will_download=needed, commit_hash='abc')], '/snapshot']
+            hub.constants.HF_HUB_DISABLE_XET = False
+
+            @contextmanager
+            def remote_stream():
+                yield SimpleNamespace(num_bytes_downloaded=123456)
+
+            hub.file_download.http_stream_backoff = remote_stream
+
+            def get_snapshot(**kwargs):
+                if kwargs.get('dry_run'):
+                    return [SimpleNamespace(will_download=needed, commit_hash='abc')]
+                if needed:
+                    with hub.file_download.http_stream_backoff():
+                        self.assertTrue(hub.constants.HF_HUB_DISABLE_XET)
+                return '/snapshot'
+
+            hub.snapshot_download.side_effect = get_snapshot
             cfg = copy.deepcopy(config.DEFAULT)
             job = dict(config=cfg, operation='edit', offline=False)
             row = {}
@@ -178,9 +215,8 @@ class ModelTests(unittest.TestCase):
             pipe.enable_model_cpu_offload.assert_called_once()
             self.assertEqual(hub.snapshot_download.call_args.kwargs['local_files_only'], not needed)
             self.assertEqual(hub.snapshot_download.call_args.kwargs['revision'], 'abc')
-            self.assertEqual(row['cache_state'], 'missing_or_partial' if needed else 'complete')
-            if not needed:
-                self.assertEqual(row['download_seconds'], 0)
+            self.assertEqual(row['downloaded_gb'], 123456 / 10**9 if needed else 0)
+            self.assertFalse(hub.constants.HF_HUB_DISABLE_XET)
 
     def test_offline_never_uses_remote_plan(self):
         torch = MagicMock(__version__='mock')
@@ -201,7 +237,7 @@ class ModelTests(unittest.TestCase):
             sampler.add('ram_rss', i)
         row = sampler.finish()
         self.assertEqual(row['ram_peak_rss_mb'], 999)
-        self.assertEqual(row['ram_avg_rss_mb'], 499.5)
+        self.assertNotIn('ram_avg_rss_mb', row)
         self.assertEqual(len(sampler.stats), 1)
 
 class ResourceTests(unittest.TestCase):
@@ -210,11 +246,11 @@ class ResourceTests(unittest.TestCase):
         class Pipeline:
             pass
         refs = []
-        def load(job, row):
+        def load(job, row, clock):
             pipe = Pipeline()
             refs.append(weakref.ref(pipe))
             return pipe
-        def fail(pipe, job, row):
+        def fail(pipe, job, row, clock):
             raise RuntimeError('inference failed')
         cfg = copy.deepcopy(config.DEFAULT)
         fake_torch = MagicMock()

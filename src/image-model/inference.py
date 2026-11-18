@@ -1,9 +1,7 @@
 """Planificación acotada, referencias y persistencia de imágenes."""
-import json
-import time
 from pathlib import Path
 
-from metrics import IMAGE_FIELDS, append_csv
+from metrics import StageClock
 from models import check_parameters
 
 
@@ -35,7 +33,10 @@ def read_references(paths):
         raise
 
 
-def infer(pipe, job, row):
+def infer(pipe, job, row, clock=None):
+    if clock is None:
+        clock = StageClock()
+    clock.switch('initialization')
     import torch
 
     cfg = job['config']
@@ -46,10 +47,11 @@ def infer(pipe, job, row):
     refs = read_references(job['references'])
     paths = []
     total = cfg['images_per_prompt']
-    row.update(inference_seconds=0.0, save_seconds=0.0)
+    dimensions = set()
     try:
         for indices, first, count in batches(len(job['prompts']), total, cfg['batch_size'],
                                             cfg['max_images_per_call'], op):
+            clock.switch('inference')
             prompts = [job['prompts'][i] for i in indices]
             kwargs = dict(prompt=prompts if len(prompts) > 1 else prompts[0],
                           num_images_per_prompt=count, num_inference_steps=settings['steps'],
@@ -60,39 +62,40 @@ def infer(pipe, job, row):
                     kwargs[key] = settings[key]
             if op == 'edit':
                 kwargs['image'] = refs if len(refs) > 1 else refs[0]
-            seeds = [None if job['seed'] is None else
-                     (job['seed'] + i * total + j) % 2**63
-                     for i in indices for j in range(first, first + count)]
             if job['seed'] is not None:
+                seeds = [(job['seed'] + i * total + j) % 2**63
+                         for i in indices for j in range(first, first + count)]
                 kwargs['generator'] = [torch.Generator(device='cpu').manual_seed(s) for s in seeds]
             check_parameters(pipe, kwargs)
             torch.cuda.synchronize()
-            start = time.perf_counter()
+            with torch.inference_mode():
+                result = pipe(**kwargs)
             try:
-                with torch.inference_mode():
-                    result = pipe(**kwargs)
                 torch.cuda.synchronize()
+                if len(result.images) != len(indices) * count:
+                    raise RuntimeError('El pipeline devolvió una cantidad inesperada de imágenes')
+                clock.switch('save')
+                for n, im in enumerate(result.images):
+                    pi, ii = indices[n // count], first + n % count
+                    path = image_path(directory, op, job['run_id'], pi, ii)
+                    output = path.open('xb')
+                    try:
+                        with output:
+                            im.save(output, format='PNG')
+                    except BaseException:
+                        path.unlink()
+                        raise
+                    paths.append(str(path))
+                    dimensions.add((im.width, im.height))
+                    width, height = next(iter(dimensions)) if len(dimensions) == 1 else ('', '')
+                    row.update(images_count=len(paths), width=width, height=height)
             finally:
-                row['inference_seconds'] += time.perf_counter() - start
-            if len(result.images) != len(indices) * count:
-                raise RuntimeError('El pipeline devolvió una cantidad inesperada de imágenes')
-            for n, im in enumerate(result.images):
-                pi, ii = indices[n // count], first + n % count
-                path = image_path(directory, op, job['run_id'], pi, ii)
-                start = time.perf_counter()
-                # Exclusión atómica: nunca sobrescribir, incluso al repetir un job.
-                with path.open('xb') as output:
-                    im.save(output, format='PNG')
-                row['save_seconds'] += time.perf_counter() - start
-                paths.append(str(path))
-                row.update(images_count=len(paths), output_files=json.dumps(paths),
-                           width=im.width, height=im.height)
-                append_csv(Path(cfg['metrics_dir']) / 'images.csv', IMAGE_FIELDS,
-                           dict(run_id=job['run_id'], image_path=str(path), prompt_index=pi,
-                                image_index=ii, width=im.width, height=im.height, seed=seeds[n]))
-                im.close()
-            del result
+                clock.switch('cleanup')
+                for image in result.images:
+                    image.close()
+                del result
     finally:
+        clock.switch('cleanup')
         for ref in refs:
             ref.close()
     return paths

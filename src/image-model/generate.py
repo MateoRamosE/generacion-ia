@@ -1,4 +1,8 @@
 """CLI sin dependencias GPU; cada trabajo espera a un proceso aislado."""
+import time
+
+START_NS = time.perf_counter_ns() if __name__ == "__main__" else None
+
 import argparse
 import json
 import subprocess
@@ -6,8 +10,10 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from datetime import datetime, timezone
 
-from config import CONFIG, load, reset, save
+from config import CONFIG, load, reset, save, save_overrides
+from metrics import StageClock, write_execution
 
 GLOBAL = {"output_dir": str, "metrics_dir": str, "cache_dir": str,
           "gpu_usd_per_hour": float, "sample_interval_seconds": float,
@@ -19,7 +25,11 @@ MODEL = {"width": int, "height": int, "steps": int, "true_cfg_scale": float,
 
 def add_settings(parser):
     for key, kind in {**GLOBAL, **MODEL}.items():
-        parser.add_argument('--' + key.replace('_', '-'), type=kind)
+        flag = '--' + key.replace('_', '-')
+        if key == 'gpu_usd_per_hour':
+            parser.add_argument(flag, '--pod-usd', type=kind)
+        else:
+            parser.add_argument(flag, type=kind)
     parser.add_argument('--max-prompts-per-call', dest='batch_size', type=int)
 
 
@@ -40,10 +50,11 @@ def run_worker(job):
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / 'job.json'
         path.write_text(json.dumps(job, ensure_ascii=False), encoding='utf-8')
+        report = Path(tmp) / 'report.json'
         child = subprocess.Popen([sys.executable, str(Path(__file__).with_name('worker.py')),
-                                  '--job', str(path)])
+                                  '--job', str(path), '--report', str(report)])
         try:
-            return child.wait()
+            code = child.wait()
         except BaseException:
             child.terminate()
             try:
@@ -53,8 +64,15 @@ def run_worker(job):
                 child.wait()
             raise
 
+        outcome = json.loads(report.read_text(encoding='utf-8')) if report.exists() else None
+    if outcome:
+        clock = StageClock.restore(**outcome['clock'])
+        write_execution(Path(job['config']['metrics_dir']) / 'executions.csv', outcome['row'], clock)
+    return code
+
 
 def main():
+    date = datetime.now(timezone.utc).strftime('%y-%m-%d')
     parser = argparse.ArgumentParser(description='Qwen en RunPod')
     sub = parser.add_subparsers(dest='operation', required=True)
     for op in ('generate', 'edit'):
@@ -67,12 +85,19 @@ def main():
         q.add_argument('--offline', action='store_true')
         add_settings(q)
     sub.add_parser('config-show')
+    migrate = sub.add_parser('metrics-migrate')
+    migrate.add_argument('--metrics-dir', type=Path)
     sub.add_parser('config-reset')
     q = sub.add_parser('config-set')
     q.add_argument('model', choices=('generate', 'edit'))
     add_settings(q)
     args = parser.parse_args()
     try:
+        if args.operation == 'metrics-migrate':
+            directory = args.metrics_dir or Path(load()['metrics_dir'])
+            write_execution(directory / 'executions.csv')
+            print(directory / 'executions.csv')
+            return
         if args.operation == 'config-show':
             print(json.dumps(load(), indent=2, ensure_ascii=False))
             return
@@ -96,7 +121,11 @@ def main():
         for path in args.reference:
             if not Path(path).is_file():
                 raise ValueError(f'No existe la referencia: {path}')
-        job = dict(run_id=uuid.uuid4().hex, operation=args.operation, prompts=prompts,
+        persistent = {key: cfg[key] for key in ('gpu_usd_per_hour', 'offload')
+                      if getattr(args, key) is not None}
+        if persistent:
+            save_overrides(persistent)
+        job = dict(start_ns=START_NS, date=date, run_id=uuid.uuid4().hex, operation=args.operation, prompts=prompts,
                    references=[str(Path(x).resolve()) for x in args.reference],
                    seed=args.seed, offline=args.offline, config=cfg)
         code = run_worker(job)

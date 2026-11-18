@@ -1,4 +1,5 @@
 import copy
+import fcntl
 import json
 import math
 import os
@@ -14,7 +15,7 @@ DEFAULT = {
  "max_images_per_call": 1,
  "images_per_prompt": 1,
  "metrics_dir": str(ROOT / "results" / "metrics"),
- "offload": "cpu",
+ "offload": "on",
  "models": {
   "generate": {"id": "Qwen/Qwen-Image-2512", "dtype": "bfloat16", "width": 1024, "height": 1024, "steps": 50, "true_cfg_scale": 1.0, "negative_prompt": " "},
   "edit": {"id": "Qwen/Qwen-Image-Edit-2511", "dtype": "bfloat16", "width": None, "height": None, "steps": 40, "true_cfg_scale": 4.0, "negative_prompt": " "}
@@ -46,8 +47,11 @@ def validate(cfg):
             raise ValueError(f"{key} debe ser un número finito no negativo")
     if cfg["sample_interval_seconds"] == 0:
         raise ValueError("El intervalo debe ser positivo")
-    if cfg["offload"] not in ("cpu", "gpu"):
-        raise ValueError("offload debe ser cpu o gpu")
+    offload = cfg["offload"]
+    if offload in ("cpu", "gpu"):
+        cfg["offload"] = "on" if offload == "cpu" else "off"
+    elif offload not in ("on", "off"):
+        raise ValueError("offload debe ser on u off")
     for key in ("cache_dir", "output_dir", "metrics_dir"):
         if not isinstance(cfg[key], str) or not cfg[key].strip():
             raise ValueError(f"{key} debe ser una ruta")
@@ -90,3 +94,13 @@ def save(cfg, path=CONFIG):
 
 def reset():
     save(copy.deepcopy(DEFAULT))
+
+
+def save_overrides(updates, path=CONFIG):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        save({**load(path), **updates}, path)
+    finally:
+        os.close(directory)

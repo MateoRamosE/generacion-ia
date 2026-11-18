@@ -42,9 +42,11 @@ Prioridad: terminal > `config.json` > `DEFAULT` de `config.py`. El archivo JSON 
 python src/image-model/generate.py config-show
 python src/image-model/generate.py config-set generate --width 1536 --height 1024 --steps 40 --images-per-prompt 10 --max-images-per-call 2
 python src/image-model/generate.py config-set edit --steps 40 --true-cfg-scale 4 --negative-prompt "borroso"
-python src/image-model/generate.py config-set generate --gpu-usd-per-hour 0.79 --offload cpu
+python src/image-model/generate.py generate --prompt "Un bosque" --pod-usd 2.71 --offload on
 python src/image-model/generate.py config-reset
 ```
+
+`--pod-usd` y `--offload` también se guardan en `config.json` al iniciar un trabajo válido, incluso si el modelo falla después. Los demás ajustes de un trabajo son temporales. `--gpu-usd-per-hour` sigue disponible como alias. `--offload on` mueve componentes entre RAM y VRAM, y `--offload off` coloca el pipeline en GPU. Los valores históricos `cpu` y `gpu` siguen siendo válidos. Ante un error de memoria, el trabajo registra el fallo y termina sin cambiar el modo elegido.
 
 `config-set` guarda explícitamente: parámetros de modelo sólo en el perfil seleccionado, parámetros globales para ambas operaciones. `config-reset` restablece la configuración completa sin tocar resultados. Para devolver una dimensión de edición a `null`, edita explícitamente el JSON o restablece defaults.
 
@@ -89,20 +91,45 @@ Online se consulta el plan `snapshot_download(dry_run=True)` completo y se fija 
 
 Imágenes predeterminadas en `/workspace/generacion-ia/results/images`. Nombre: `operacion-run_id-prompt_index-image_index.png`, índices desde cero y run_id UUID. Apertura exclusiva: una colisión produce error en lugar de sobrescribir.
 
-Las métricas predeterminadas siguen en `results/metrics` del repositorio. `images.csv` conserva el esquema histórico. Las ejecuciones nuevas usan **`executions-v2.csv`** porque añadir columnas al CSV anterior corrompería su encabezado. `executions.csv` queda intacto. Hay bloqueo de archivo Linux entre escritores y comprobación estricta de encabezados.
+El único CSV nuevo es `results/metrics/executions.csv`. Cada trabajo genera una fila con su fecha de inicio UTC en formato `aa-mm-dd`, parámetros efectivos, recuento de PNG guardados, máximos de memoria y costo estimado. Si las imágenes guardadas tienen dimensiones distintas, ancho y alto quedan vacíos. Una semilla omitida queda vacía.
 
-Cada imagen enlaza su run_id, índices y semilla efectiva. El registro de ejecución incluye modelo, operación, parámetros completos en JSON, recuentos, dimensiones reales, versiones, memoria, estado/error, caché, tiempos y costos estimados. Los contadores y tiempos se acumulan antes de terminar: si falla una llamada posterior, se conservan las imágenes ya registradas y su información. No se reintenta automáticamente la escritura de una fila.
+### Migración del historial
 
-- `cache_check_seconds`: planificación online o resolución offline, sin transferencia de pesos.
-- `download_seconds`: cero con caché completa; cuando faltan archivos, tiempo de la operación de descarga (incluye coordinación y trabajo local, no tiempo puro de red).
-- `load_seconds`: carga y colocación de componentes, con sincronización CUDA.
-- `inference_seconds`: llamadas de inferencia sincronizadas con CUDA.
-- `save_seconds`: escritura de imágenes; no incluye la escritura de CSV.
-- `total_seconds`: ejecución del worker, incluido cierre de muestreo y liberación, excepto el arranque del intérprete y escritura final de su CSV.
+Conserva el directorio de métricas de tu instalación y detén los procesos de la versión anterior antes de actualizar. La primera ejecución de esta versión migra el historial al publicar su fila. También puedes migrar sin GPU ni generación:
 
-RAM = RSS del proceso. PyTorch distingue memoria asignada y reservada: promedios muestreados y máximos del asignador, incluida la carga. NVML mide memoria total del dispositivo, incluidos otros procesos; se busca la GPU por UUID de CUDA o `CUDA_VISIBLE_DEVICES`. Si no puede identificarse o NVML falla, deja campos vacíos. Los promedios son medias de muestras y los picos NVML/RSS pueden omitir ráfagas entre muestras. El muestreo usa almacenamiento constante.
+```bash
+python src/image-model/generate.py metrics-migrate
+# Para un directorio distinto del configurado:
+python src/image-model/generate.py metrics-migrate --metrics-dir /ruta/a/metrics
+```
 
-Tarifa manual en USD/h × segundos / 3600; se registran costo de inferencia y costo total. Son estimaciones, no facturación exacta de RunPod. SIGKILL, corte de energía o un disco inaccesible pueden impedir la fila final. Imagen y CSV no son una transacción: un fallo entre ambas escrituras puede dejar un archivo sin fila. No hay recuperación automática ni reanudación de trabajos interrumpidos.
+Se fusionan por `run_id` el historial de `executions.csv` y `executions-v2.csv`. El primer valor conocido prevalece y los datos por imagen de `images.csv` pueden completar recuentos y dimensiones verificables. Los CSV anteriores se retiran después de publicar el resultado. Los costos históricos se conservan. Las métricas sin medición quedan vacías, incluida la división del antiguo `load_seconds` en lectura y preparación.
+
+### Tiempos y costo
+
+| Campo | Operaciones incluidas |
+| --- | --- |
+| `initialization_seconds` | Opciones, configuración, arranque del hijo, validación de GPU, importaciones, muestreador y preparación de referencias y directorio de imágenes. |
+| `cache_check_seconds` | Plan del Hub, resolución de caché, tamaño del snapshot y diagnóstico de descarga. |
+| `download_seconds` | Transferencias pendientes, coordinación de archivos, comprobaciones y escritura de la caché durante la descarga. |
+| `model_read_seconds` | Lectura de archivos, deserialización y construcción del pipeline antes de colocarlo en GPU o instalar offloading. |
+| `model_prepare_seconds` | Traslado del pipeline a GPU o instalación de hooks de offloading, y sincronización de CUDA. |
+| `inference_seconds` | Preparación de las llamadas, generadores, validación de parámetros, inferencia y sincronización de CUDA. El offloading durante las llamadas forma parte de esta fase. |
+| `save_seconds` | Creación y escritura de los PNG y actualización de su recuento. |
+| `cleanup_seconds` | Cierre de imágenes y referencias, liberación de recursos, errores, informe interno del hijo y su salida, y cierre del directorio temporal del trabajo. |
+| `metrics_write_seconds` | Bloqueo, lectura y fusión del historial, escritura íntegra del CSV temporal y su primera sincronización a disco. |
+
+El cronómetro monotónico asigna cada intervalo a una sola fase. Las etapas suman exactamente `total_seconds` en representación decimal de nanosegundos. El tiempo empieza al entrar al script del CLI. Para medir la escritura, el archivo temporal reserva tres campos. El cronómetro se cierra tras el primer `fsync`, y luego se completan los tres valores, se sincronizan y se publica el CSV con un reemplazo atómico. Ese cierre final, la sincronización del directorio, la retirada de archivos históricos y la salida del CLI quedan fuera del intervalo medido. Contar esas operaciones en la misma fila exigiría otra escritura posterior.
+
+El costo estimado es `gpu_usd_per_hour × total_seconds / 3600`. La tarifa inicial es cero hasta configurarla. La tarifa nueva solo se aplica a trabajos nuevos. Si el proceso es terminado antes de comunicar sus métricas al CLI, o falla el disco al publicar el CSV, pueden quedar imágenes sin fila.
+
+### Descarga y memoria
+
+`downloaded_gb` cuenta los bytes de cuerpo HTTP recibidos para los archivos del modelo, incluidos los bytes recibidos en intentos interrumpidos o reintentos. Excluye cabeceras y consultas de metadatos. Para acceder al contador del transporte, las descargas de este proceso usan el backend HTTP de Hugging Face Hub 2.4 en lugar de Xet. `model_size_gb` es el tamaño lógico en disco de los archivos disponibles en el snapshot, siguiendo enlaces y contando cada archivo físico una vez. Ambos campos usan GB decimales.
+
+Cero GB descargados indica reutilización del contenido local cuando el snapshot se resuelve correctamente. En ejecuciones online, el mensaje de consola distingue descarga completa y parcial según los archivos faltantes en el plan. En el CSV, ambas columnas permiten comparar transferencia y tamaño local. Compresión, reintentos, blobs compartidos o descargas concurrentes pueden impedir distinguir solo con esa comparación si la transferencia cubrió todos los archivos. Si no se llega a resolver el snapshot, su tamaño queda vacío.
+
+La RAM usa el máximo RSS del proceso hijo informado por Linux. La VRAM mide el máximo observado en el dispositivo por NVML, puede incluir otros procesos y puede omitir picos entre muestras. Si NVML no entrega datos, la celda queda vacía.
 
 ## Pruebas
 
@@ -111,4 +138,4 @@ python -m unittest discover -s tests -v
 python -m compileall -q src tests
 ```
 
-No descargan modelos ni requieren CUDA. Véase `VERIFICACION.md` para los resultados y lo pendiente en RunPod.
+No descargan modelos ni requieren CUDA. `VERIFICACION.md` documenta la entrega anterior. Las pruebas de esta versión cubren el esquema, migración y deduplicación, cierre de tiempos, y los flujos simulados de caché e inferencia.
